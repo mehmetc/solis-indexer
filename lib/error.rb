@@ -1,10 +1,10 @@
-module OdisData
-  class Error < StandardError
+module Error
+  class General < StandardError
   end
 
-  class IndexError < Error
+  class IndexError < General
   end
 
-  class MetadataError < Error
+  class MetadataError < General
   end
 end

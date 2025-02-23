@@ -7,7 +7,7 @@ if [ -z "$SERVICE_ROLE" ]; then
 fi
 
 case $SERVICE_ROLE in
-data_indexer)
+indexer)
   bundle exec ruby data_indexer.rb
   ;;
 *)

@@ -2,7 +2,6 @@ $LOAD_PATH << '.'
 require 'thread'
 require 'active_support/all'
 require 'lib/indexer'
-require 'lib/metadata'
 
 STDOUT.sync = true
 
@@ -10,8 +9,8 @@ listener = DataCollector::Pipeline.new(name: DataCollector::ConfigFile[:services
 indexer = Indexer.new
 $running = true
 $LOADERS = {
-  organisaties: Metadata::Organisatie.new(indexer),
-  personen: Metadata::Persoon.new(indexer)
+  organisaties: Indexer::Metadata::Organisatie.new(indexer),
+  personen: Indexer::Metadata::Persoon.new(indexer)
 }
 
 begin

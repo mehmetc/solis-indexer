@@ -2,13 +2,13 @@ require 'data_collector'
 require 'lib/elastic'
 require 'thread'
 require_relative 'error'
+require 'lib/indexer/metadata'
 
 Dir.glob('./config/rules/*_rules.rb').each do |rule|
   puts "Loading rule #{rule}"
   require "#{rule}"
 end
 
-module OdisData
   class Indexer
     attr_reader :index_name, :queue
     def initialize()
@@ -23,7 +23,7 @@ module OdisData
 
     def index(data)
       if data
-        @elastic.index.insert(data, 'id', false)
+        @elastic.index.insert(data, 'fiche.id', false)
       end
     rescue => e
       puts data
@@ -34,7 +34,7 @@ module OdisData
     end
 
     def recreate
-      raise OdisData::IndexError, 'Please supply block' unless block_given?
+      raise Error::IndexError, 'Please supply block' unless block_given?
       @index_alias = @config[:elastic][:index]
       @current_index_name = @elastic.alias.index(@index_alias).first
       @new_index_name = "#{@index_alias}_#{Time.now.to_i}"
@@ -126,4 +126,3 @@ module OdisData
       DataCollector::Core.log("Error indexing: #{e.message}")
     end
   end
-end

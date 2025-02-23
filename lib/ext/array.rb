@@ -4,7 +4,8 @@ class Array
     output = ''
     each do |data|
       next if data.nil?
-      id = data.key?(id_label) ? data[id_label] : nil
+      id = DataCollector::Core.filter(data, id_label)&.first
+      #id = data.key?(id_label) ? data[id_label] : nil
 
       nd_index = if id
                    {"#{action}": {"_index": index, "_id": "#{id_prefix}#{id}"}}
