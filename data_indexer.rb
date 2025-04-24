@@ -7,11 +7,8 @@ STDOUT.sync = true
 
 listener = DataCollector::Pipeline.new(name: DataCollector::ConfigFile[:services][:data_indexer][:name] || 'indexer', uri: DataCollector::ConfigFile[:services][:data_indexer][:indexer][:in])
 indexer = Indexer.new
+service = Indexer::Metadata::Solis.new(indexer)
 $running = true
-$LOADERS = {
-  organisaties: Indexer::Metadata::Organisatie.new(indexer),
-  personen: Indexer::Metadata::Persoon.new(indexer)
-}
 
 begin
   listener.on_message do |_input, _output, id|
@@ -19,7 +16,7 @@ begin
     File.readlines(id, chomp: true).each do |id|
       if id.eql?('*')
         indexer.recreate do
-          $LOADERS.each do |entity, service|
+            entity = id.gsub(::Solis::Options.instance.get[:graph_name] ,'').split('/').first.classify
             DataCollector::Core.log("#{listener.name}: running #{entity}")
             service.for(id) do |data|
               next unless data
@@ -33,14 +30,14 @@ begin
 
             while indexer.queue.size > 0
               sleep 5
-              DataCollector::Core.log("#{listener.name}: resuming #{entity} ids in queue #{indexer.queue.size}")
+              DataCollector::Core.log("#{listener.name}: resuming #{entity} ids in queue size = #{indexer.queue.size}")
             end
-          end
         end
+
+        puts JSON.pretty_generate(indexer.stats)
       else
         entity = id.split('/')[-2]&.to_sym
         DataCollector::Core.log("#{listener.name}: running #{entity}")
-        service = $LOADERS[entity]
         if service
           service.for(id) do |data|
             raise StandardError, "\tNo data for #{id}" unless data
@@ -68,9 +65,7 @@ ensure
   DataCollector::Core.log("#{listener.name}: stopping")
   listener.stop if listener.running?
   indexer.stop
-  $LOADERS.each do |_entity, service|
-    service.stop
-  end
+  service.stop
 end
 
 

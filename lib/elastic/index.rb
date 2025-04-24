@@ -90,10 +90,14 @@ class Index
                          body: data.to_ndjson(@name, id, "index"))
 
     response_body = JSON.parse(response.body.to_s)
-    raise "Failed to insert record into #{@name}, #{"./ndjson/#{filename}.ndjson"} - #{response.code}, #{response.body.to_s}" if response.code != 200
-    raise "Failed to insert record into #{@name}, #{"./ndjson/#{filename}.ndjson"} - #{response.code}, #{response_body.to_s}" if response_body["errors"]
+    raise "Failed to insert record into #{@name}, #{"./ndjson/#{filename}.ndjson"} - #{response.code}" if response.code != 200
+    raise "Failed to insert record into #{@name}" if response_body["errors"]
 
-    response_body.to_s
+    response_body
+  rescue StandardError => e
+    errors = {}
+    response_body['items'].select{|m| m['index']['status'] != 201}.each{|m| d=m['index']; errors[d['_id']] = d['error']}
+    raise e, errors.to_json
   end
 
   def get_by_id(id)

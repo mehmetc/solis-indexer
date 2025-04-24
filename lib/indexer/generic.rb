@@ -5,40 +5,40 @@ require 'thread'
 class Indexer
   class Metadata
     class Generic
-      def initialize(indexer, entity, construct)
-        #@config = DataCollector::ConfigFile
+      def initialize(indexer)
         @indexer = indexer
-        @entity = entity
-        @entity_id = "#{entity.underscore}_id"
-        @filename = construct
         @loader_threads = []
         @loader_queue = Queue.new
         @running = true
+        @config = ::Solis::ConfigFile[:services][:data_indexer]
 
-        @config = DataCollector::ConfigFile[:services][:data_indexer]
-        solis_conf = Solis::ConfigFile[:services][:data][:solis]
-        @solis = Solis::Graph.new(Solis::Shape::Reader::File.read(solis_conf[:shape]), solis_conf)
+        solis_conf = ::Solis::ConfigFile[:services][:data][:solis]
+        @solis = ::Solis::Graph.new(::Solis::Shape::Reader::File.read(solis_conf[:shape]), solis_conf)
         setup_loader_workers(@config[:indexer][:workers])
+
+        @entities = @config[:entities]
       end
 
       def for(key)
+        @entity = entity_for(key)
         case key
         when '*'
-          load_all
-          total = count()
-          run_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-          while @loader_queue.size != 0
-            if (Process.clock_gettime(Process::CLOCK_MONOTONIC) - run_time).to_i.modulo(30) == 0
+          total = load_all
+          prev_clock = 0
+          while @loader_queue.size > 0
+            current_clock=Process.clock_gettime(Process::CLOCK_MONOTONIC).to_i
+            if current_clock.modulo(30) == 0 && prev_clock!=current_clock
               DataCollector::Core.log("To be loaded: #{@loader_queue.size}/#{total}")
+              prev_clock = current_clock
             end
             key = @loader_queue.pop
             data = load_by_id(key)
-            yield apply_data_to_query_list(data, @entity)
+            yield data # apply_data_to_query_list(data)
           end
           DataCollector::Core.log("Done loading all records")
         else
           data = load_by_id(key)
-          yield apply_data_to_query_list(data, @entity)
+          yield data # apply_data_to_query_list(data)
         end
       end
 
@@ -51,18 +51,25 @@ class Indexer
       end
 
       private
+      def entity_for(key)
+        key.gsub(::Solis::Options.instance.get[:graph_name], '').split('/').first.classify
+      end
 
       def count()
-        Solis::Query.run('', "SELECT (COUNT(distinct ?s) as ?count) FROM <#{Solis::Options.instance.get[:graph_name]}> WHERE {?s ?p ?o ; a <#{Solis::Options.instance.get[:graph_name]}#{@entity}>.}").first[:count].to_i
+        ::Solis::Query.run('', "SELECT (COUNT(distinct ?s) as ?count) FROM <#{::Solis::Options.instance.get[:graph_name]}> WHERE {?s ?p ?o ; a <#{::Solis::Options.instance.get[:graph_name]}#{@entity}>.}").first[:count].to_i
       end
 
       def load_by_id(id)
-        DataCollector::Core.log("Loading #{id}")
-        # data = Solis::Query.run(@entity, "SELECT * FROM <#{Solis::Options.instance.get[:graph_name]}> WHERE {<#{id}> ?p ?o ; a <#{Solis::Options.instance.get[:graph_name]}#{@entity}>.}")
-        data = Solis::Query.run_construct_with_file(@filename, @entity_id, @entity, id, 0)
-        File.open("#{@config[:indexer][:raw]}/#{id.split('/').last}.json", "w") do |f|
-          f.write(data.to_json)
-        end
+        # DataCollector::Core.log("Loading #{id}")
+        entity = entity_for(id)
+
+        base_url = "#{::Solis::ConfigFile[:services][:data_logic][:host]}#{::Solis::ConfigFile[:services][:data_logic][:base_path]}"
+        url = "#{base_url}/graph?entity=#{entity}&id=#{id.split('/').last}&from_cache=0&depth=5"
+
+        data = JSON.parse(HTTP.timeout(5).get(url).body)
+        # File.open("#{@config[:indexer][:raw]}/#{id.split('/').last}.json", "w") do |f|
+        #   f.write(data.to_json)
+        # end
 
         data
       rescue StandardError => e
@@ -70,30 +77,40 @@ class Indexer
       end
 
       def load_all
+        total_count = 0
         limit = 1000
-        offset = 0
-        total = count()
 
-        while offset < total
-          run_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-          DataCollector::Core.log("Reading #{offset} - #{offset + limit} of #{total}")
-          q = "SELECT DISTINCT ?s FROM <#{Solis::Options.instance.get[:graph_name]}> WHERE {?s ?p ?o ; a <#{Solis::Options.instance.get[:graph_name]}#{@entity}>.} limit #{limit} offset #{offset}"
-          ids = Solis::Query.run('', q).map { |m| m[:s] }
-          File.open("#{@config[:indexer][:ids]}/#{offset}.txt", 'w') do |f|
-            ids.each do |id|
-              @loader_queue << id
-              f.puts id
-              offset += 1
-              if offset.modulo(100) == 0
-                DataCollector::Core.log("#{offset}/#{total} in #{Process.clock_gettime(Process::CLOCK_MONOTONIC) - run_time} seconds")
-                run_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        @entities.each do |entity|
+          offset = 0
+          @entity = entity
+          DataCollector::Core.log("Loading all #{entity} entities")
+          total = count()
+          total_count += total
+          DataCollector::Core.log("Found #{total} #{entity} entities")
+
+          while offset < total
+            run_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            DataCollector::Core.log("Reading #{offset} - #{offset + limit} of #{total_count}")
+            q = "SELECT DISTINCT ?s FROM <#{::Solis::Options.instance.get[:graph_name]}> WHERE {?s ?p ?o ; a <#{::Solis::Options.instance.get[:graph_name]}#{@entity}>.} limit #{limit} offset #{offset}"
+            ids = ::Solis::Query.run('', q).map { |m| m[:s] }
+            #filename = "#{Time.new.to_i}-#{rand(100000)}"
+            #File.open("#{@config[:indexer][:ids]}/#{filename}.txt", 'w') do |f|
+              ids.each do |id|
+                @loader_queue << id
+                #    f.puts id
+                offset += 1
+                if offset.modulo(100) == 0
+                  DataCollector::Core.log("#{@entity} - #{offset}/#{total} in #{Process.clock_gettime(Process::CLOCK_MONOTONIC) - run_time} seconds")
+                  run_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+                end
               end
-            end
+            #end
           end
         end
+        total_count
       end
 
-      def apply_data_to_query_list(data, entity)
+      def apply_data_to_query_list(data)
         new_data = []
         return new_data if data.nil?
         data.each do |d|
@@ -182,9 +199,6 @@ class Indexer
               nd.map { |m| m[index_key] }.compact.map { |m| m.delete_if { |k, v| k.eql?('id') } }.each { |e|
                 if tnd.key?(e.keys.first)
                   a = tnd[e.keys.first]
-                  # if a.is_a?(Hash)
-                  #   a = a.merge(e.values.first)
-                  # else
                   a = [a] unless a.is_a?(Array)
                   a << e.values.first
                   # end
@@ -235,13 +249,14 @@ class Indexer
             DataCollector::Core.log("Starting load worker #{Thread.current[:name]}")
             while @running
               if @loader_queue.size > 0
-                sleep 5 if @loader_queue.size > 20
+                #sleep 5 if @loader_queue.size > 20
                 begin
                   retries ||= 1
                   id = @loader_queue.pop
                   raw_data = load_by_id(id)
-                  data = apply_data_to_query_list(raw_data, @entity)
-                  @indexer.index(data)
+                  data = raw_data # apply_data_to_query_list(raw_data)
+                  @indexer.queue << data
+                  ##@indexer.index(data)
                 rescue StandardError => e
                   if retries < 3
                     DataCollector::Core.log("Retrying #{retries}/3 in 10 sec.: #{e.message}")
