@@ -26,20 +26,36 @@ class Indexer
           total = load_all
           prev_clock = 0
           while @loader_queue.size > 0
-            current_clock=Process.clock_gettime(Process::CLOCK_MONOTONIC).to_i
-            if current_clock.modulo(30) == 0 && prev_clock!=current_clock
-              DataCollector::Core.log("To be loaded: #{@loader_queue.size}/#{total}")
-              prev_clock = current_clock
+            begin
+              current_clock = Process.clock_gettime(Process::CLOCK_MONOTONIC).to_i
+              if current_clock.modulo(30) == 0 && prev_clock != current_clock
+                DataCollector::Core.log("To be loaded: #{@loader_queue.size}/#{total}")
+                prev_clock = current_clock
+              end
+              key = @loader_queue.pop
+              begin
+                data = load_by_id(key)
+                yield data # apply_data_to_query_list(data)
+              rescue StandardError => e
+                raise Error::IndexError, "Failed to load #{key}: #{e.message}"
+              end
+            rescue StandardError => e
+              DataCollector::Core.log("#{e.message}")
+              retry if @loader_queue.size > 0
             end
-            key = @loader_queue.pop
-            data = load_by_id(key)
-            yield data # apply_data_to_query_list(data)
+
           end
           DataCollector::Core.log("Done loading all records")
         else
-          data = load_by_id(key)
-          yield data # apply_data_to_query_list(data)
+          begin
+            data = load_by_id(key)
+            yield data
+          rescue StandardError => e
+            raise Error::IndexError, "Failed to load #{key}: #{e.message}"
+          end
         end
+      rescue StandardError => e
+        raise Error::IndexError, "Failed to load #{key}: #{e.message}"
       end
 
       def stop
@@ -51,6 +67,7 @@ class Indexer
       end
 
       private
+
       def entity_for(key)
         key.gsub(::Solis::Options.instance.get[:graph_name], '').split('/').first.classify
       end
@@ -93,18 +110,18 @@ class Indexer
             DataCollector::Core.log("Reading #{offset} - #{offset + limit} of #{total_count}")
             q = "SELECT DISTINCT ?s FROM <#{::Solis::Options.instance.get[:graph_name]}> WHERE {?s ?p ?o ; a <#{::Solis::Options.instance.get[:graph_name]}#{@entity}>.} limit #{limit} offset #{offset}"
             ids = ::Solis::Query.run('', q).map { |m| m[:s] }
-            #filename = "#{Time.new.to_i}-#{rand(100000)}"
-            #File.open("#{@config[:indexer][:ids]}/#{filename}.txt", 'w') do |f|
-              ids.each do |id|
-                @loader_queue << id
-                #    f.puts id
-                offset += 1
-                if offset.modulo(100) == 0
-                  DataCollector::Core.log("#{@entity} - #{offset}/#{total} in #{Process.clock_gettime(Process::CLOCK_MONOTONIC) - run_time} seconds")
-                  run_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-                end
+            # filename = "#{Time.new.to_i}-#{rand(100000)}"
+            # File.open("#{@config[:indexer][:ids]}/#{filename}.txt", 'w') do |f|
+            ids.each do |id|
+              @loader_queue << id
+              #    f.puts id
+              offset += 1
+              if offset.modulo(100) == 0
+                DataCollector::Core.log("#{@entity} - #{offset}/#{total} in #{Process.clock_gettime(Process::CLOCK_MONOTONIC) - run_time} seconds")
+                run_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
               end
-            #end
+            end
+            # end
           end
         end
         total_count
@@ -249,7 +266,7 @@ class Indexer
             DataCollector::Core.log("Starting load worker #{Thread.current[:name]}")
             while @running
               if @loader_queue.size > 0
-                #sleep 5 if @loader_queue.size > 20
+                # sleep 5 if @loader_queue.size > 20
                 begin
                   retries ||= 1
                   id = @loader_queue.pop

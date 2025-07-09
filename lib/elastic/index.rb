@@ -15,7 +15,7 @@ class Index
   end
 
   def exist?
-    response = HTTP.head("#{@elastic}/#{@name}", headers: {'Accept' => 'application/json'})
+    response = HTTP.head("#{@elastic}/#{@name}", headers: { 'Accept' => 'application/json' })
     response.code == 200
   end
 
@@ -25,14 +25,14 @@ class Index
 
     @logger.info "Creating index #{@name}"
     response = HTTP.put("#{@elastic}/#{@name}", body: @configuration.to_json,
-                        headers: {'Content-Type' => 'application/json'})
+                        headers: { 'Content-Type' => 'application/json' })
     @logger.info "status #{response.code}"
     return true if response.code == 200
 
     raise "Failed to create index #{@name} \n#{response.body}"
   end
 
-  def delete(name=@name)
+  def delete(name = @name)
     raise "Index #{name} does not exist" unless exist?
 
     @logger.info "Deleting index #{name}"
@@ -43,8 +43,7 @@ class Index
     raise "Failed to delete index #{name} \n#{response.body}"
   end
 
-
-  def delete_data(data, id = 'id', save_to_disk = false, id_prefix='')
+  def delete_data(data, id = 'id', save_to_disk = false, id_prefix = '')
     raise "Index #{@name} does not exist" unless exist?
     raise "Index type is not set. Configuration not loaded" unless @type
 
@@ -58,7 +57,7 @@ class Index
 
     @logger.info "Deleting #{data.size} from #{@name}/#{@type}"
     response = HTTP.post("#{@elastic}/_bulk",
-                         headers: {'Content-Type' => 'application/x-ndjson'},
+                         headers: { 'Content-Type' => 'application/x-ndjson' },
                          body: data.to_ndjson(@name, id, "delete", id_prefix))
 
     body = JSON.parse(response.body.to_s)
@@ -69,34 +68,53 @@ class Index
   end
 
   def insert(data, id = 'id', save_to_disk = false)
-    raise "Index #{@name} does not exist" unless exist?
-    raise "Index type is not set. Configuration not loaded" unless @type
-    raise "Data can not be nil" if data.nil?
+    begin
+      retries ||= 0
 
-    data = [data] unless data.is_a?(Array)
+      raise "Index #{@name} does not exist" unless exist?
+      raise "Index type is not set. Configuration not loaded" unless @type
+      raise "Data can not be nil" if data.nil?
 
-    return '' if data.nil? || data.empty?
+      data = [data] unless data.is_a?(Array)
 
-    filename = "#{Time.new.to_i}-#{rand(100000)}"
-    if save_to_disk
-      File.open("./ndjson/#{filename}.ndjson", "wb") do |f|
-        f.puts data.to_ndjson(@name, id, "index")
+      return '' if data.nil? || data.empty?
+
+      filename = "#{Time.new.to_i}-#{rand(100000)}"
+      if save_to_disk
+        File.open("./ndjson/#{filename}.ndjson", "wb") do |f|
+          f.puts data.to_ndjson(@name, id, "index")
+        end
       end
+
+      @logger.info "Inserting #{data.size} into #{@name}/#{@type}"
+      response = HTTP.post("#{@elastic}/_bulk",
+                           headers: { 'Content-Type' => 'application/x-ndjson' },
+                           body: data.to_ndjson(@name, id, "index"))
+
+      response_body = JSON.parse(response.body.to_s)
+      raise "Failed to insert record into #{@name}, #{"./ndjson/#{filename}.ndjson"} - #{response.code}" if response.code != 200
+      raise "Failed to insert record into #{@name}" if response_body["errors"]
+
+      response_body
+    rescue StandardError => e
+      if response_body["errors"]
+        @logger.info "Removing bad records and trying again"
+        response_body['items'].select { |m| m['index']['status'] != 201 }.each do |error|
+          id =  error["index"]["_id"]
+          error_type = error["index"]["error"]["type"]
+          error_reason = error["index"]["error"]["reason"]
+          @logger.error "#{id} - #{error_type}: #{error_reason}"
+          data.delete_if{|d| d.dig('fiche','_id').eql?(id)}
+        end
+
+        retry if (retries += 1) < 2
+      end
+      raise e
     end
-
-    @logger.info "Inserting #{data.size} into #{@name}/#{@type}"
-    response = HTTP.post("#{@elastic}/_bulk",
-                         headers: {'Content-Type' => 'application/x-ndjson'},
-                         body: data.to_ndjson(@name, id, "index"))
-
-    response_body = JSON.parse(response.body.to_s)
-    raise "Failed to insert record into #{@name}, #{"./ndjson/#{filename}.ndjson"} - #{response.code}" if response.code != 200
-    raise "Failed to insert record into #{@name}" if response_body["errors"]
-
-    response_body
   rescue StandardError => e
-    errors = {}
-    response_body['items'].select{|m| m['index']['status'] != 201}.each{|m| d=m['index']; errors[d['_id']] = d['error']}
+    retry if errors == {}
+
+    response_body['items'].select { |m| m['index']['status'] != 201 }.each { |m| d = m['index']; errors[d['_id']] = d['error'] }
     raise e, errors.to_json
   end
 

@@ -29,9 +29,9 @@ class Indexer
       @stats['load'].merge!(DataCollector::Core.filter(data, '$[*].fiche.data._id').map{|m| m.split('/')[-2]}.tally){|k,o,n| o+n}
       result = @elastic.index.insert(data, 'fiche.data._id', false)
 
-      if result['items'].size != data.size
+      if result.empty? || result['items'].size != data.size
         all_in_ids = DataCollector::Core.filter(data, '$[*].fiche.data._id').sort
-        all_out_ids = result['items'].map{|m| m['index']['_id']}.sort
+        all_out_ids = result['items'].map{|m| m['index']['_id']}.sort rescue []
         missing = all_in_ids - all_out_ids
         if missing.size > 0
           raise Error::IndexError, missing.join(', ')
@@ -164,8 +164,8 @@ class Indexer
               sleep 10
             end
           rescue StandardError => e
-            data = []
             DataCollector::Core.log("Error indexing: #{e.message}")
+            data = []
           end
         end
         self.index(data) if data.size > 0
