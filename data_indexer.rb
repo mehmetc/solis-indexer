@@ -13,6 +13,7 @@ $running = true
 
 begin
   listener.on_message do |_input, _output, id|
+
     DataCollector::Core.log("#{listener.name}: #{id}")
     File.readlines(id, chomp: true).each do |id|
       id = id.gsub('"','') # sanitize

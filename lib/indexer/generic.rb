@@ -29,7 +29,7 @@ class Indexer
             begin
               current_clock = Process.clock_gettime(Process::CLOCK_MONOTONIC).to_i
               if current_clock.modulo(30) == 0 && prev_clock != current_clock
-                DataCollector::Core.log("To be loaded: #{@loader_queue.size}/#{total}")
+                DataCollector::Core.log("Queued to be loaded: #{@loader_queue.size}/#{total}")
                 prev_clock = current_clock
               end
               key = @loader_queue.pop
@@ -37,7 +37,8 @@ class Indexer
                 data = load_by_id(key)
                 yield data # apply_data_to_query_list(data)
               rescue StandardError => e
-                raise Error::IndexError, "Failed to load #{key}: #{e.message}"
+                puts e.backtrace.join("\n")
+                raise Error::IndexError, "Failed to load(#{__LINE__}) #{key}: #{e.message}"
               end
             rescue StandardError => e
               DataCollector::Core.log("#{e.message}")
@@ -51,11 +52,12 @@ class Indexer
             data = load_by_id(key)
             yield data
           rescue StandardError => e
-            raise Error::IndexError, "Failed to load #{key}: #{e.message}"
+            raise Error::IndexError, "Failed to load(#{__LINE__}) #{key}: #{e.message}"
           end
         end
       rescue StandardError => e
-        raise Error::IndexError, "Failed to load #{key}: #{e.message}"
+        puts e.backtrace.join("\n")
+        raise Error::IndexError, "Failed to load(#{__LINE__}) #{key}: #{e.message}"
       end
 
       def stop

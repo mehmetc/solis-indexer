@@ -14,6 +14,8 @@ RUN chown -R solis:solis /app
 
 USER solis:solis
 
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["/app/run.sh"]
 # Metadata
 LABEL org.opencontainers.image.vendor="KULeuven/LIBIS" \
 	org.opencontainers.image.url="https://www.libis.be" \

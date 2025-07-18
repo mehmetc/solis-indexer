@@ -4,20 +4,25 @@ require 'thread'
 require_relative 'error'
 require 'lib/indexer/solis'
 
-Dir.glob('./config/rules/*_rules.rb').each do |rule|
-  puts "Loading rule #{rule}"
-  require "#{rule}"
+if Dir.exist?('./config/rules')
+  Dir.glob('./config/rules/*_rules.rb').each do |rule|
+    puts "Loading rule #{rule}"
+    require "#{rule}"
+  end
+else
+  puts "No rules found"
+  exit!
 end
 
 class Indexer
-  attr_reader :index_name, :queue, :stats
+  attr_reader :index_name, :queue, :stats, :workers
 
   def initialize()
     @running = true
     @queue = Queue.new
     @config = DataCollector::ConfigFile[:services][:data_indexer]
     @elastic = setup_elastic
-    @index_workers = []
+    @workers = []
     @stats = {'load' => {}, 'error' => {}}
 
     setup_index_workers(@config[:elastic][:workers])
@@ -28,7 +33,6 @@ class Indexer
       data = process(data)
       @stats['load'].merge!(DataCollector::Core.filter(data, '$[*].fiche.data._id').map{|m| m.split('/')[-2]}.tally){|k,o,n| o+n}
       result = @elastic.index.insert(data, 'fiche.data._id', false)
-
       if result.empty? || result['items'].size != data.size
         all_in_ids = DataCollector::Core.filter(data, '$[*].fiche.data._id').sort
         all_out_ids = result['items'].map{|m| m['index']['_id']}.sort rescue []
@@ -43,7 +47,6 @@ class Indexer
     if errors
       @stats['error'].merge!(errors.keys.map{|m| m.split('/')[-2]}.tally){|k,o,n| o+n}
     end
-
     raise Error::IndexError, e.message
   end
 
@@ -77,15 +80,16 @@ class Indexer
 
   def stop
     @running = false
-    @index_workers.each do |worker|
+    @workers.each do |worker|
       DataCollector::Core.log("Draining index worker #{worker[:name]}")
       worker.join(5) unless worker.stop?
     end
   end
 
-  private
+
 
   def process(metadata)
+    return if metadata.empty? || metadata.nil? || !running?
     result = []
     rule_name = 'GENERIC_RULES'
     begin
@@ -101,8 +105,10 @@ class Indexer
     end
 
     begin
+      raise "Rule not defined: #{rule_name}" unless Object.const_defined?(rule_name)
       rules = Object.const_get(rule_name)
     rescue StandardError => e
+      DataCollector::Core.log("Available rules: #{Object.constants.grep(/RULES/).join(", ")}")
       rule_name = 'GENERIC_RULES'
       retry
     end
@@ -113,12 +119,12 @@ class Indexer
       DataCollector::Core.rules.run(rules, data, output, { "_no_array_with_one_element" => true, solis: Solis::Options.instance })
       result << output.raw
     end
-
     result.each { |m| m.deep_stringify_keys! }
   rescue => e
     raise e, "Error processing #{rule_name} -> #{e.message}"
   end
 
+  private
   def setup_elastic
     @index_alias = @config[:elastic][:index]
     @new_index_name = "#{@index_alias}_#{Time.now.to_i}"
@@ -143,25 +149,42 @@ class Indexer
     elastic
   end
 
-  def setup_index_workers(number_of_workers)
+  def setup_index_workers2(number_of_workers)
     number_of_workers.times do |i|
-      @index_workers << Thread.new do
-        Thread.current[:name] = i
+      @workers << Thread.new do
+        Thread.current[:name] = i.to_s
         DataCollector::Core.log("Starting index worker #{Thread.current[:name]}")
         data = []
-        run_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        prev_clock = 0
         while @running
           begin
-            current_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            Thread.current[:data] = data
+            current_clock = Process.clock_gettime(Process::CLOCK_MONOTONIC).to_i
+            if current_clock.modulo(30) == 0 && prev_clock != current_clock
+              DataCollector::Core.log("To be indexed: #{@queue.size}")
+              prev_clock = current_clock
+            end
             if @queue.size > 0
-              data += @queue.pop
-              if data.size > 100 || (current_time - run_time).to_i > 30
-                self.index(data)
-                data = []
-                run_time = current_time
+              begin
+                raw_data = @queue.pop(true) #non blocking
+                if raw_data.is_a?(Array)
+                  data += raw_data
+                else
+                  DataCollector::Core.log("BAD data: #{raw_data.inspect}")
+                end
+              rescue ThreadError #empty queue
+                sleep 0.2
               end
             else
+              # DataCollector::Core.log("Indexer is waiting for data")
               sleep 10
+            end
+
+            if data.size > 100 || current_clock.modulo(30) == 0
+              DataCollector::Core.log("SAVING - start")
+              self.index(data) if data.size > 0
+              data = []
+              DataCollector::Core.log("SAVING - done")
             end
           rescue StandardError => e
             DataCollector::Core.log("Error indexing: #{e.message}")
@@ -174,5 +197,90 @@ class Indexer
     end
   rescue StandardError => e
     DataCollector::Core.log("Error indexing: #{e.message}")
+  end
+
+  def setup_index_workers(number_of_workers)
+    number_of_workers.times do |i|
+      @workers << Thread.new do
+        worker_name = "index_worker_#{i}"
+        DataCollector::Core.log("Starting index worker #{worker_name}")
+
+        data = []
+        last_log_time = 0
+        last_force_save_time = 0
+
+        while @running
+          begin
+            current_time = Process.clock_gettime(Process::CLOCK_MONOTONIC).to_i
+
+            # Batch queue items
+            batch_data = get_queue_batch(data)
+
+            # Log queue size every 30 seconds
+            if should_log_queue_size?(current_time, last_log_time)
+              # DataCollector::Core.log("Queued for indexing: #{@queue.size}")
+              last_log_time = current_time
+            end
+
+            # Save data if batch is full or it's time for periodic save
+            if should_save_data?(data, current_time, last_force_save_time)
+              save_batch(data, worker_name)
+              data.clear
+              last_force_save_time = current_time if current_time % 30 == 0
+            end
+
+            # Only sleep if no data was processed
+            sleep(batch_data > 0 ? 0.01 : 0.2)
+
+          rescue StandardError => e
+            DataCollector::Core.log("Error in worker #{worker_name}: #{e.message}")
+            data.clear
+          end
+        end
+
+        # Final save on shutdown
+        save_batch(data, worker_name) unless data.empty?
+        DataCollector::Core.log("Stopping index worker #{worker_name}")
+      end
+    end
+  rescue StandardError => e
+    DataCollector::Core.log("Error setting up workers: #{e.message}")
+  end
+
+  def get_queue_batch(data, max_items = 50)
+    items_processed = 0
+
+    max_items.times do
+      begin
+        raw_data = @queue.pop(true)
+        if raw_data.is_a?(Array)
+          data.concat(raw_data)
+          items_processed += 1
+        else
+          DataCollector::Core.log("Invalid data format: #{raw_data.class}")
+        end
+      rescue ThreadError
+        break # Queue empty
+      end
+    end
+
+    items_processed
+  end
+
+  def should_log_queue_size?(current_time, last_log_time)
+    current_time % 30 == 0 && last_log_time != current_time
+  end
+
+  def should_save_data?(data, current_time, last_force_save_time)
+    data.size >= 100 ||
+      (current_time % 30 == 0 && last_force_save_time != current_time)
+  end
+
+  def save_batch(data, worker_name)
+    return if data.empty?
+
+    DataCollector::Core.log("#{worker_name} saving #{data.size} items")
+    self.index(data)
+    DataCollector::Core.log("#{worker_name} save complete")
   end
 end
