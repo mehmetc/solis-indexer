@@ -5,9 +5,10 @@ require 'thread'
 class Indexer
   class Metadata
     class Generic
+      attr_reader :workers
       def initialize(indexer)
         @indexer = indexer
-        @loader_threads = []
+        @workers = []
         @loader_queue = Queue.new
         @running = true
         @config = ::Solis::ConfigFile[:services][:data_indexer]
@@ -62,7 +63,7 @@ class Indexer
 
       def stop
         @running = false
-        @loader_threads.each do |worker|
+        @workers.each do |worker|
           DataCollector::Core.log("Draining load worker #{worker[:name]}")
           worker.join(5) unless worker.stop?
         end
@@ -85,7 +86,7 @@ class Indexer
         base_url = "#{::Solis::ConfigFile[:services][:data_logic][:host]}#{::Solis::ConfigFile[:services][:data_logic][:base_path]}"
         url = "#{base_url}/graph?entity=#{entity}&id=#{id.split('/').last}&from_cache=0&depth=5"
 
-        data = JSON.parse(HTTP.timeout(5).get(url).body)
+        data = JSON.parse(HTTP.timeout(60).get(url).body)
         # File.open("#{@config[:indexer][:raw]}/#{id.split('/').last}.json", "w") do |f|
         #   f.write(data.to_json)
         # end
@@ -118,7 +119,7 @@ class Indexer
               @loader_queue << id
               #    f.puts id
               offset += 1
-              if offset.modulo(100) == 0
+              if offset.modulo(1000) == 0
                 DataCollector::Core.log("#{@entity} - #{offset}/#{total} in #{Process.clock_gettime(Process::CLOCK_MONOTONIC) - run_time} seconds")
                 run_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
               end
@@ -263,7 +264,7 @@ class Indexer
 
       def setup_loader_workers(number_of_workers)
         number_of_workers.times do |i|
-          @loader_threads << Thread.new do
+          @workers << Thread.new do
             Thread.current[:name] = i
             DataCollector::Core.log("Starting load worker #{Thread.current[:name]}")
             while @running
