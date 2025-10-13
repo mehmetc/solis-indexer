@@ -4,8 +4,8 @@ require 'thread'
 require_relative 'error'
 require 'lib/indexer/solis'
 
-if Dir.exist?('./config/rules')
-  Dir.glob('./config/rules/*_rules.rb').each do |rule|
+if Dir.exist?(DataCollector::ConfigFile[:services][:data_indexer][:rules])
+  Dir.glob("#{DataCollector::ConfigFile[:services][:data_indexer][:rules]}/*_rules.rb").each do |rule|
     puts "Loading rule #{rule}"
     require "#{rule}"
   end
@@ -44,7 +44,7 @@ class Indexer
 
     update_load_stats(index_data)
 
-    result = @elastic.index.insert(index_data, 'fiche.data._id', false)
+    result = @elastic.index.insert(index_data, 'record.id', false)
     validate_index_result(result, index_data)
 
     data.clear
@@ -112,14 +112,36 @@ class Indexer
 
     result = []
     output = DataCollector::Output.new
-
+    graph_name = Solis::Options.instance.get.key?(:graphs) ? Solis::Options.instance.get[:graphs].select{|s| s['type'].eql?(:main)}&.first['name'] : ''
+    language = Solis::ConfigFile[:services][:data][:solis][:language]
     metadata.each do |data|
       output.clear
+      tmp_result = {}
+      id = DataCollector::Core.filter(data, '$._id').first
       DataCollector::Core.rules.run(rules, data, output, {
         "_no_array_with_one_element" => true,
         solis: Solis::Options.instance
       })
-      result << output.raw
+      tmp_result = output.raw.with_indifferent_access
+      if @config.key?(:languages) && @config[:languages].length > 0
+        tmp_result['record']['data'] = { language => tmp_result['record']['data']}
+
+
+        url = "#{Solis::ConfigFile[:services][:data][:host]}#{Solis::ConfigFile[:services][:data][:base_path]}#{id.gsub(graph_name, '')}?depth=5"
+        @config[:languages].each do |lang|
+          next if lang.eql?(language)
+          output.clear
+          data = JSON.parse(HTTP.timeout(60).get("#{url}&language=#{lang}").body)
+          DataCollector::Core.rules.run(rules, data, output, {
+            "_no_array_with_one_element" => true,
+            solis: Solis::Options.instance
+          })
+
+          tmp_result['record']['data'][lang.to_sym] = output.raw.with_indifferent_access[:record][:data]
+        end
+      end
+
+      result << tmp_result
     end
 
    result.each(&:deep_stringify_keys!)

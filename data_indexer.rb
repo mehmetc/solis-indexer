@@ -21,7 +21,7 @@ begin
         prev_clock = 0
         indexer.recreate do
           begin
-            entity = id.gsub(::Solis::Options.instance.get[:graph_name] ,'').split('/').first.classify
+            entity = id.gsub(Indexer::Metadata::Solis.graph_name, '').split('/').first.classify
             DataCollector::Core.log("#{listener.name}: running #{entity}")
             service.for(id) do |data|
               next unless data

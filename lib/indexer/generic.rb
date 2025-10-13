@@ -35,8 +35,9 @@ class Indexer
               end
               key = @loader_queue.pop
               begin
+
                 data = load_by_id(key)
-                yield data # apply_data_to_query_list(data)
+                yield data
               rescue StandardError => e
                 puts e.backtrace.join("\n")
                 raise Error::IndexError, "Failed to load(#{__LINE__}) #{key}: #{e.message}"
@@ -69,24 +70,27 @@ class Indexer
         end
       end
 
+      def self.graph_name
+        ::Solis::Options.instance.get.key?(:graphs) ? ::Solis::Options.instance.get[:graphs].select{|s| s['type'].eql?(:main)}&.first['name'] : ''
+      end
+
       private
 
       def entity_for(key)
-        key.gsub(::Solis::Options.instance.get[:graph_name], '').split('/').first.classify
+        key.gsub(::Indexer::Metadata::Generic.graph_name, '').split('/').first.classify
       end
 
       def count()
-        ::Solis::Query.run('', "SELECT (COUNT(distinct ?s) as ?count) FROM <#{::Solis::Options.instance.get[:graph_name]}> WHERE {?s ?p ?o ; a <#{::Solis::Options.instance.get[:graph_name]}#{@entity}>.}").first[:count].to_i
+        ::Solis::Query.run('', "SELECT (COUNT(distinct ?s) as ?count) FROM <#{::Indexer::Metadata::Generic.graph_name}> WHERE {?s ?p ?o ; a <#{::Indexer::Metadata::Generic.graph_name}#{@entity}>.}").first[:count].to_i
       end
 
-      def load_by_id(id)
-        # DataCollector::Core.log("Loading #{id}")
+      def load_by_id(id, language = ::Solis::Options.instance.get[:language])
         entity = entity_for(id)
 
         base_url = "#{::Solis::ConfigFile[:services][:data_logic][:host]}#{::Solis::ConfigFile[:services][:data_logic][:base_path]}"
         url = "#{base_url}/graph?entity=#{entity}&id=#{id.split('/').last}&from_cache=0&depth=5"
 
-        data = JSON.parse(HTTP.timeout(60).get(url).body)
+        data = JSON.parse(HTTP.timeout(60).get("#{url}&language=#{language}").body)
         # File.open("#{@config[:indexer][:raw]}/#{id.split('/').last}.json", "w") do |f|
         #   f.write(data.to_json)
         # end
@@ -111,7 +115,7 @@ class Indexer
           while offset < total
             run_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
             DataCollector::Core.log("Reading #{offset} - #{offset + limit} of #{total_count}")
-            q = "SELECT DISTINCT ?s FROM <#{::Solis::Options.instance.get[:graph_name]}> WHERE {?s ?p ?o ; a <#{::Solis::Options.instance.get[:graph_name]}#{@entity}>.} limit #{limit} offset #{offset}"
+            q = "SELECT DISTINCT ?s FROM <#{::Indexer::Metadata::Generic.graph_name}> WHERE {?s ?p ?o ; a <#{::Indexer::Metadata::Generic.graph_name}#{@entity}>.} limit #{limit} offset #{offset}"
             ids = ::Solis::Query.run('', q).map { |m| m[:s] }
             # filename = "#{Time.new.to_i}-#{rand(100000)}"
             # File.open("#{@config[:indexer][:ids]}/#{filename}.txt", 'w') do |f|
