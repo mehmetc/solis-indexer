@@ -12,6 +12,7 @@ class Indexer
         @loader_queue = Queue.new
         @running = true
         @config = ::Solis::ConfigFile[:services][:data_indexer]
+        @query_size = @config[:query_size] || 10
 
         solis_conf = ::Solis::ConfigFile[:services][:data][:solis]
         @solis = ::Solis::Graph.new(::Solis::Shape::Reader::File.read(solis_conf[:shape]), solis_conf)
@@ -33,10 +34,9 @@ class Indexer
                 DataCollector::Core.log("Queued to be loaded: #{@loader_queue.size}/#{total}")
                 prev_clock = current_clock
               end
-              key = @loader_queue.pop
+              keys = @query_size.times.map {@loader_queue.pop(true)} rescue []
               begin
-
-                data = load_by_id(key)
+                data = load_by_id(keys)
                 yield data
               rescue StandardError => e
                 puts e.backtrace.join("\n")
@@ -84,16 +84,16 @@ class Indexer
         ::Solis::Query.run('', "SELECT (COUNT(distinct ?s) as ?count) FROM <#{::Indexer::Metadata::Generic.graph_name}> WHERE {?s ?p ?o ; a <#{::Indexer::Metadata::Generic.graph_name}#{@entity}>.}").first[:count].to_i
       end
 
-      def load_by_id(id, language = ::Solis::Options.instance.get[:language])
-        entity = entity_for(id)
+      def load_by_id(ids, language = ::Solis::Options.instance.get[:language])
+        ids = [ids] unless ids.is_a?(Array)
+        raise Error::IndexError, 'not id given for lookup' if ids.is_a?(Array) && ids.empty?
+        entity = entity_for(ids.first)
+        ids.map! { |id| id.split('/').last }
 
         base_url = "#{::Solis::ConfigFile[:services][:data_logic][:host]}#{::Solis::ConfigFile[:services][:data_logic][:base_path]}"
-        url = "#{base_url}/graph?entity=#{entity}&id=#{id.split('/').last}&from_cache=0&depth=5"
+        url = "#{base_url}graph?entity=#{entity}&id=#{ids.join(',')}&from_cache=0&depth=5"
 
         data = JSON.parse(HTTP.timeout(60).get("#{url}&language=#{language}").body)
-        # File.open("#{@config[:indexer][:raw]}/#{id.split('/').last}.json", "w") do |f|
-        #   f.write(data.to_json)
-        # end
 
         data
       rescue StandardError => e
@@ -273,14 +273,14 @@ class Indexer
             DataCollector::Core.log("Starting load worker #{Thread.current[:name]}")
             while @running
               if @loader_queue.size > 0
-                # sleep 5 if @loader_queue.size > 20
+                ids = []
                 begin
                   retries ||= 1
-                  id = @loader_queue.pop
-                  raw_data = load_by_id(id)
-                  data = raw_data # apply_data_to_query_list(raw_data)
-                  @indexer.queue << data
-                  ##@indexer.index(data)
+                  if ids.empty?
+                    ids = @query_size.times.map {@loader_queue.pop(true)} rescue []
+                  end
+                  raw_data = load_by_id(ids)
+                  @indexer.queue << raw_data
                 rescue StandardError => e
                   if retries < 3
                     DataCollector::Core.log("Retrying #{retries}/3 in 10 sec.: #{e.message}")

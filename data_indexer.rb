@@ -43,6 +43,7 @@ begin
               begin
                 sleep 5
                 DataCollector::Core.log("#{listener.name}: resuming #{entity} ids in queue size:#{indexer.queue.size}, load workers:#{service.workers.map(&:alive?).select{|s| s}.size}/#{service.workers.size}, index workers:#{indexer.workers.map(&:alive?).select{|s| s}}/#{indexer.workers.size}")
+                indexer.workers.each(&:wakeup)
               rescue StandardError => e
                 retry if indexer.queue.size > 0
               end

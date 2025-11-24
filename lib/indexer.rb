@@ -21,6 +21,7 @@ class Indexer
     @running = true
     @queue = Queue.new
     @config = DataCollector::ConfigFile[:services][:data_indexer]
+    @query_size = @config[:query_size] || 10
     @elastic = setup_elastic
     @workers = []
     @stats = {'load' => {}, 'error' => {}}
@@ -44,7 +45,8 @@ class Indexer
 
     update_load_stats(index_data)
 
-    result = @elastic.index.insert(index_data, 'record.id', false)
+    index_id = @config[:elastic][:id] || 'record.id'
+    result = @elastic.index.insert(index_data, index_id, false)
     validate_index_result(result, index_data)
 
     data.clear
@@ -264,7 +266,7 @@ class Indexer
 
     max_items_to_add.times do
       begin
-        raw_data = @queue.pop(true) # non-blocking pop
+        raw_data = @query_size.times.map{@queue.pop(true)} # non-blocking pop
 
         if raw_data.is_a?(Array)
           batch.concat(raw_data)
