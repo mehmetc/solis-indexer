@@ -77,7 +77,7 @@ class Indexer
       private
 
       def entity_for(key)
-        key.gsub(::Indexer::Metadata::Generic.graph_name, '').split('/').first.classify
+        key.to_s.gsub(::Indexer::Metadata::Generic.graph_name, '').split('/').first.classify
       end
 
       def count()
@@ -85,19 +85,32 @@ class Indexer
       end
 
       def load_by_id(ids, language = ::Solis::Options.instance.get[:language])
-        ids = [ids] unless ids.is_a?(Array)
-        raise Error::IndexError, 'not id given for lookup' if ids.is_a?(Array) && ids.empty?
-        entity = entity_for(ids.first)
-        ids.map! { |id| id.split('/').last }
+        retries = 0
+        begin
+          ids = [ids] unless ids.is_a?(Array)
+          raise Error::IndexError, 'no id given for lookup' if ids.is_a?(Array) && ids.empty?
+          entity = entity_for(ids.first)
+          ids.map! { |id| id.to_s.split('/').last }
 
-        base_url = "#{::Solis::ConfigFile[:services][:data_logic][:host]}#{::Solis::ConfigFile[:services][:data_logic][:base_path]}"
-        url = "#{base_url}graph?entity=#{entity}&id=#{ids.join(',')}&from_cache=0&depth=5"
+          base_url = "#{::Solis::ConfigFile[:services][:data_logic][:host]}#{::Solis::ConfigFile[:services][:data_logic][:base_path]}"
+          base_url = base_url =~ /\/$/ ? base_url : "#{base_url}/"
+          url = "#{base_url}graph?entity=#{entity}&id=#{ids.join(',')}&from_cache=0&depth=5"
 
-        data = JSON.parse(HTTP.timeout(60).get("#{url}&language=#{language}").body)
+          data = JSON.parse(HTTP.timeout(60).get("#{url}&language=#{language}").body)
 
-        data
+          data
+        rescue ::TimeoutError => e
+          DataCollector::Core.log("Retrying(#{retries}) in 10 seconds: timeout for #{url}")
+          sleep 10
+          retries += 1
+          retry if retries < 3
+        end
       rescue StandardError => e
-        raise Error::IndexError, "Failed to load #{id}: #{e}"
+        unless ids.is_a?(Array) && ids.empty?
+          raise Error::IndexError, "Failed to load #{ids.join(', ')}: #{e}"
+        end
+
+        []
       end
 
       def load_all
@@ -114,14 +127,14 @@ class Indexer
 
           while offset < total
             run_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-            DataCollector::Core.log("Reading #{offset} - #{offset + limit} of #{total_count}")
+            DataCollector::Core.log("Reading #{entity} #{offset} - #{offset + limit} of #{total_count}")
             q = "SELECT DISTINCT ?s FROM <#{::Indexer::Metadata::Generic.graph_name}> WHERE {?s ?p ?o ; a <#{::Indexer::Metadata::Generic.graph_name}#{@entity}>.} limit #{limit} offset #{offset}"
             ids = ::Solis::Query.run('', q).map { |m| m[:s] }
             # filename = "#{Time.new.to_i}-#{rand(100000)}"
             # File.open("#{@config[:indexer][:ids]}/#{filename}.txt", 'w') do |f|
             ids.each do |id|
-              @loader_queue << id
-              #    f.puts id
+              @loader_queue << id.to_s
+
               offset += 1
               if offset.modulo(1000) == 0
                 DataCollector::Core.log("#{@entity} - #{offset}/#{total} in #{Process.clock_gettime(Process::CLOCK_MONOTONIC) - run_time} seconds")

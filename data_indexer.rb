@@ -27,7 +27,9 @@ begin
               next unless data
               break unless $running
               begin
-                indexer.queue << data
+                data.each do |d|
+                  indexer.queue << d
+                end
                 indexer.workers.each(&:wakeup) if indexer.queue.size > 1000 #force indexers
               rescue StandardError => e
                 DataCollector::Core.error(e.message)
@@ -42,7 +44,7 @@ begin
             while indexer.queue.size > 0
               begin
                 sleep 5
-                DataCollector::Core.log("#{listener.name}: resuming #{entity} ids in queue size:#{indexer.queue.size}, load workers:#{service.workers.map(&:alive?).select{|s| s}.size}/#{service.workers.size}, index workers:#{indexer.workers.map(&:alive?).select{|s| s}}/#{indexer.workers.size}")
+                DataCollector::Core.log("#{listener.name}: resuming #{entity} ids in queue size:#{indexer.queue.size}, load workers:#{service.workers.map(&:alive?).select{|s| s}.size}/#{service.workers.size}, index workers:#{indexer.workers.map(&:alive?).select{|s| s}.size}/#{indexer.workers.size}")
                 indexer.workers.each(&:wakeup)
               rescue StandardError => e
                 retry if indexer.queue.size > 0

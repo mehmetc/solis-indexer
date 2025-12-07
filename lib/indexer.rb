@@ -27,6 +27,7 @@ class Indexer
     @stats = {'load' => {}, 'error' => {}}
     @stats_mutex = Mutex.new
     @shutdown_timeout = 30 # seconds
+    @data_filter_path = @config[:indexer][:data_filter_path]
 
     # Dynamic batching configuration
     @min_batch_size = @config.dig(:indexer, :min_batch_size) || 10
@@ -40,7 +41,7 @@ class Indexer
   def index(data)
     return unless data && !data.empty?
 
-    index_data = process(data)
+    index_data = process(data.flatten)
     return if index_data.empty?
 
     update_load_stats(index_data)
@@ -109,49 +110,70 @@ class Indexer
   def process(metadata)
     return [] if metadata.nil? || metadata.empty? || !running?
 
-    rule_name = determine_rule_name(metadata)
-    rules = get_rules(rule_name)
-
     result = []
-    output = DataCollector::Output.new
+
     graph_name = Solis::Options.instance.get.key?(:graphs) ? Solis::Options.instance.get[:graphs].select{|s| s['type'].eql?(:main)}&.first['name'] : ''
     language = Solis::ConfigFile[:services][:data][:solis][:language]
-    metadata.each do |data|
-      output.clear
-      tmp_result = {}
-      id = DataCollector::Core.filter(data, '$._id').first
-      DataCollector::Core.rules.run(rules, data, output, {
-        "_no_array_with_one_element" => true,
-        solis: Solis::Options.instance
-      })
-      tmp_result = output.raw.with_indifferent_access
-      if @config.key?(:languages) && @config[:languages].length > 0
-        tmp_result['record']['data'] = { language => tmp_result['record']['data']}
+    languages = @config.key?(:languages) && @config[:languages].length > 0 ? @config[:languages] + [language] : [language]
 
+    ids = metadata.map{|m| m['_id'].split('/').last}
+    entity = metadata.first['_id']&.gsub(graph_name, '')&.split('/')&.first&.classify
+    base_url = "#{Solis::ConfigFile[:services][:data_logic][:host]}#{Solis::ConfigFile[:services][:data_logic][:base_path]}"
+    base_url = base_url =~ /\/$/ ? base_url : "#{base_url}/"
+    url = "#{base_url}graph?from_cache=0&entity=#{entity}&id=#{ids.join(',')}&depth=5"
 
-        url = "#{Solis::ConfigFile[:services][:data][:host]}#{Solis::ConfigFile[:services][:data][:base_path]}#{id.gsub(graph_name, '')}?depth=5"
-        @config[:languages].each do |lang|
-          next if lang.eql?(language)
-          output.clear
-          data = JSON.parse(HTTP.timeout(60).get("#{url}&language=#{lang}").body)
-          DataCollector::Core.rules.run(rules, data, output, {
-            "_no_array_with_one_element" => true,
-            solis: Solis::Options.instance
-          })
+    tmp_result = {language => apply_rules(metadata)}
 
-          tmp_result['record']['data'][lang.to_sym] = output.raw.with_indifferent_access[:record][:data]
+    if languages.size > 1
+      languages.each do |lang|
+        next if lang.eql?(language)
+        begin
+          metadata = JSON.parse(HTTP.timeout(60).get("#{url}&language=#{lang}").body)
+          tmp_result[lang] = apply_rules(metadata)
+        rescue => e
+          next
         end
       end
+    end
 
-      result << tmp_result
+    #merge all languages in one array
+    tmp_result[language].each do |record|
+      records = { language => record }
+      record_id = record['_id']
+      languages.each do |lang|
+        next if lang.eql?(language)
+        records[lang] = tmp_result[lang].select{|s| s['_id'].eql?(record_id)}&.first
+
+      end
+      result << {@config[:indexer][:root] => {'data' => records, 'type' => entity, 'id' => record_id}}
     end
 
    result.each(&:deep_stringify_keys!)
   rescue => e
-    raise e, "Error processing #{rule_name} -> #{e.message}"
+    pp e.backtrace.join("\n")
+    raise e, "Error processing -> #{e.message}"
   end
 
   private
+
+  def apply_rules(metadata)
+    tmp_result = []
+    rule_name = determine_rule_name(metadata)
+    rules = get_rules(rule_name)
+
+    output = DataCollector::Output.new
+    metadata.each do |data|
+      output.clear
+      DataCollector::Core.rules.run(rules, data, output, {
+        "_no_array_with_one_element" => true,
+        solis: Solis::Options.instance
+      })
+      tmp_result << DataCollector::Core.filter(output.raw, @data_filter_path)&.first&.with_indifferent_access
+    end
+    tmp_result
+  rescue => e
+    raise e, "Error processing #{rule_name} -> #{e.message}"
+  end
 
   def setup_elastic
     @index_alias = @config[:elastic][:index]
@@ -267,6 +289,7 @@ class Indexer
     max_items_to_add.times do
       begin
         raw_data = @query_size.times.map{@queue.pop(true)} # non-blocking pop
+        raw_data = [raw_data] if raw_data.is_a?(Hash)
 
         if raw_data.is_a?(Array)
           batch.concat(raw_data)
@@ -274,7 +297,7 @@ class Indexer
         else
           DataCollector::Core.log("Invalid data format in queue: #{raw_data.class}")
         end
-      rescue ThreadError
+      rescue ThreadError => e
         # Queue is empty
         break
       end
@@ -293,6 +316,7 @@ class Indexer
       index(batch)
       DataCollector::Core.log("#{worker_name} successfully saved #{batch_size} items")
     rescue => e
+      DataCollector::Core.log(e.backtrace.join("\n")) if e.backtrace
       DataCollector::Core.log("#{worker_name} failed to save batch: #{e.message}")
       raise
     end
